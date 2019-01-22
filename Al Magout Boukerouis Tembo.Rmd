@@ -1,0 +1,349 @@
+---
+title: "Homework 1"
+author: 'Al Magout, Boukerouis, Tembo '
+date: "16 avril 2018"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = FALSE)
+load("C:/Users/pc/Dropbox/SL proj/trackme.RData")
+library(plotly)
+library(MeanShift)
+library(meanShiftR)
+library(ggplot2)
+library(gplots)
+library(ggmap)
+library(ks)
+library(rgr)
+library(pracma)
+data<-runtrack
+# Map boundaries
+myLocation <- c(min(runtrack$lon, na.rm = T),
+                min(runtrack$lat, na.rm = T),
+                max(runtrack$lon, na.rm = T),
+                max(runtrack$lat, na.rm = T))
+# Get the map from Google (default)
+myMapInD <- get_map(location = myLocation, maptype = "roadmap", zoom = 13)
+
+```
+
+## I) A matter of point of view : Independent points approch
+
+### Quick data exploration 
+In this homework the objective is to caracterize the running habits of a person. To do so we dispose of the tracks of 60 running sessions. Each track is a sucession of location for witch we dispose of the exact date.
+Little is known of the data collection process, and so it's hard to evaluate their representativity of the actual continous running paths. The time between tracks is not constant. The time between two tracks generaly oscilate between 1 and 10 seconds. Both the speed and the distance bewteen points are even more irregular.  
+```{r Distance pior-next points ,echo=FALSE}
+Distance<-rep(0,length(data$lat))
+Speed<-rep(0,length(data$lat))
+prev <<-""
+for(i in 1:length(data$lat)){
+  if(prev==data$id[i]){
+    Distance[i] <- sqrt((data$lon[i]-data$lon[i-1])**2+ (data$lat[i]-data$lat[i-1])**2)
+    Speed[i] <- sqrt((data$lon[i]-data$lon[i-1])**2+ (data$lat[i]-data$lat[i-1])**2)/as.numeric(data$time[i]-data$time[i-1])
+  }
+  prev <<-data$id[i]
+}
+dt <-data.frame(Distance,Speed)
+
+# create data
+names=c(rep("log(Ditsance)",  length(Distance[Distance>0])) , rep("log(Speed)", length(Speed[Speed>0])) )
+value=c( log(Distance[Distance>0]),log(Speed)[Speed>0])
+dat=data.frame(names,value)
+ggplot(dat, aes(x=names, y=value, fill=names)) +
+  geom_boxplot(alpha=0.4) +
+  stat_summary(fun.y=mean, geom="point", shape=20, size=10, color="goldenrod") +
+  theme(legend.position="none") +
+  scale_fill_brewer(palette="Paired") +
+  ggtitle("Boxplot of the log-distance and log-mean-speed between following points")
+  
+
+```
+
+Some points have a posterior mean speed (norm of the mean of the speed vectors between t-1 and t) way higher or lower than the others as can be seen in the boxplot of the log of the mean and the speed. Similare observations can be made for the distance. We can only extrapolate on the origine of those variations (different ways of transportation, errors ...) , and it's not the objective of this homework to explain them. But it semmed importante to us to higthlight their existance as they may introduce a bias in the density estimation if some locations recieved more points during one passage. 
+
+### Favorite running places using mean shift 
+
+#### Bendwith estimation
+In this part we try to estimate the density corresponding to the runner presence using a gaussian kernel with a diagonal bendwith. We choose this type of bendwith to speed up the process as the number of observation is quite important. To select the bendwith we first tried to use a Biased Cross-Validation validation with a staring matrix proportional to the variance. The function is the one implemeted in the package ks. We had to apply the function to a sample of the point, once again for speed reason. 
+```{r Bendwith Selection , echo=FALSE}
+set.seed(123)
+#Bendwith selection for Gaussian Kernel 
+d<-sample(1:length(data[,1]),100) # To speed up the process we operate it in a subset of point
+d<-order(d)
+Points<-matrix(cbind(data$lon[d],data$lat[d]),ncol=2) 
+H_Mat <- Hbcv.diag(Points) # diag to reduce computational time wich is already too long 
+print(H_Mat)
+
+
+
+```
+
+But the result is far too small. It resorted from a quick internet search that it was a common problem for spatial data because of their heterogeneity. We resorted to choosing h manualy by setting a square bandwith and decreesing it progressivly. We settled with a (0.1,0.1) bendwith.   
+
+
+```{r Bandwith2 sel, echo=FALSE}
+
+
+
+d=MASS::kde2d(x = runtrack$lon,y = runtrack$lat,h=c(H_Mat[1,1],H_Mat[2,2]) )
+with(d, plot_ly(x = d$x, y = d$y, z = d$z,title="Bad estimation of the density", type = "surface")) %>%
+  layout(title = "Estimation with the too small bendwith ")
+
+
+#with h=0.5, oversmoothing
+d=MASS::kde2d(x = runtrack$lon,y = runtrack$lat,h=c(0.5,0.5))
+with(d, plot_ly(x = d$x, y = d$y, z = d$z, type = "surface")%>%layout(title = "Density estimation with h=0.5 - oversmoothing"))
+
+#with h=0.01
+d=MASS::kde2d(x = runtrack$lon,y = runtrack$lat,h=c(0.01,0.01))
+with(d, plot_ly(x = d$x, y = d$y, z = d$z, type = "surface")%>%
+  layout(title = "Density estimation with h=0.01 - The good one"))
+
+#with h=0.005, undersmoothing
+d=MASS::kde2d(x = runtrack$lon,y = runtrack$lat,h=c(0.005,0.005))
+with(d, plot_ly(x = d$x, y = d$y, z = d$z, type = "surface")%>%
+  layout(title = "Density estimation with h=0.005 - undersmoothing"))
+
+
+```
+
+  
+#### Final density estimation 
+```{r density pres ,echo=FALSE}
+
+dmap=ggmap(myMapInD)+geom_density2d(mapping=, data = runtrack[,1:2],h=0.01 )+  scale_fill_gradient(low = 'maroon', high = 'yellow', 
+                       guide = 'colorbar')
+plot(dmap)
+
+
+```
+
+#### Finding the modes with Mean Shift
+
+Then we use the mean shift method to find the modes. We tried several parametrisations before settling on this one.  
+
+```{r mean shift ,echo=FALSE}
+#mean shift
+
+da=list(subset(runtrack,select = c('lon','lat')))
+da=matrix(unlist(da),ncol=2)
+result=meanShift(da, da, nNeighbors = 5000,bandwidth = c(0.01,0.01),  iterations = 10, epsilon = 1e-08,epsilonCluster = 1e-07)
+mscenter=unique(result$value)
+colnames(mscenter)=c('lon','lat')
+
+centroid=as.data.frame(mscenter)
+gp <- ggmap(myMapInD) + geom_point(data = centroid,
+                                   aes(x = lon, y = lat),
+                                   size = 2, colour = I("darkslateblue"), alpha = 1)  + ggtitle("Modes found by the mean shift technique") 
+plot(gp)
+```
+
+### Should we have tried to correct the possible sampling bias ? 
+Going back to the initial observation about the uncertain processus of sampling for the points. We tried to see if it could have affected the results or if it was  negligable o). So we reestimated the density using the distance as a weight to give more prevalence to the points where we thought the sampling was scarcer. Of course this distance do not take into account the curvature of the road but we hoped that the points were close enough for it not to be a major issue.  
+
+#### Estimating the denstity with  
+Theorically we should estimate the bandwith once again with de weights. But the previous issue of a data structure that induced a very small bandwith is not solved by introducing a weight. Hence we kept h=(0.1,0,1) as the bandwith.  
+
+```{r wheght, echo=FALSE}
+
+library(viridis)
+d2=kde(data.matrix(runtrack)[,1:2] ,h=c(0.0001,0.0001))
+d=kde(data.matrix(runtrack)[,1:2] ,h=c(0.0001,0.0001),w=Distance)
+par(mfrow = c(1,2))
+plot(d2,display="filled.contour",cont=seq(10,90,10),col=viridis::cividis(10))
+title("Without weight",
+      cex.main = 2,   font.main= 1, col.main= "Black")
+plot(d,display="filled.contour",cont=seq(10,90,10),col=viridis::cividis(10))
+title("With weight",
+      cex.main = 2,   font.main= 1, col.main= "Black")
+
+
+
+```
+
+There is no sgnificative difference as far as the graphic can show. So we considered taking into account those weight not necessary for what follows. 
+
+## II) Paths approch
+Previously we considered the points as if their weren't each part of a running session. In this part we try to take the running session into account.     
+
+### The problem of the distance (and of infite dimension)
+
+To consider tracks we have to associate them with a mathematical object. For track points the association is obvious. It's a bit trickier with traks. What is proposed it to consider them as function. We will consider them to be function  from [0,1[  to C such as lim(f) in 1 is f(0). We choose it because we noticed that the tracks started and ended all in the same point. With this choice we have to deal with a couple of problems.
+
+First the ensemble of function is infinite, hence normes are not equivalent, hence the convergence for one measure of error does not guaranty the convergence for a other (at least to the extent of our limited knowledge of infinte space). Basically we have no idea of what is theorically going on.
+
+Which lead to rather speculative considerations regarding the distance to use. We will use the H distance for lack of a  realislticly computable (by us) other idea. But are still bothered by aspects such as :<br/>;
+image: ![](https://image.ibb.co/bthkK7/im1.png)
+<br/>;
+This is partiulaty worrisome if we consider the contraints that roads put into the path. Most function from [0,1[ -> C we consier are actually not possible at all. Intuitivly we'd say that B and C are more similar than C and A because they share a common road for most of there tracks.( It is of course true if we are interested in localisation, A and C are more similar in terms of shape.)
+That is why we considered an other distance  : 
+<br/>;
+image: ![](https://preview.ibb.co/c9xkK7/im3.jpg)
+<br/>;
+
+But two problems made us go back to H distance. First the estimation of said distance is very clearly not a distance and we don't know if it is a problem. Secondly, the compuational time of said distance is too long to use in the (already too long) means shift. As the distance between A and B need the calcul of he distance between each point of A and the segments defined by following points of B in order to find the distance of between each point of A and the polygone formed by the points of B. Before taking the mean of those distances as evalutaion of the distance between A and B.        
+
+
+### Conputing the new density
+We use the benwith of the previous part as epsilon.
+
+```{r Take your time this will take a while ,echo=FALSE}
+run = subset(runtrack, id == "run_1")
+run1 = matrix(c(run$lon, run$lat), ncol = 2)
+run = subset(runtrack, id == "run_2")
+run2 = matrix(c(run$lon, run$lat), ncol = 2)
+dist_1_2 = hausdorff_dist(run1, run2)
+
+
+func_H_distance <- function(X){
+  dist_matrix <- matrix(0, nrow = 60, ncol = 60)
+  for(r0 in 1:60){
+    set_gamma <- matrix(c(subset(X, id == paste(c("run_", r0), collapse = ""))$lon, subset(X, id == paste(c("run_", r0), collapse = ""))$lat), ncol = 2)
+    for(r1 in 1:60){
+      set_Gi <- matrix(c(subset(X, id == paste(c("run_", r1), collapse = ""))$lon, subset(X, id == paste(c("run_", r1), collapse = ""))$lat), ncol = 2)
+      dist_set_gamma_set_Gi <- hausdorff_dist(set_gamma, set_Gi)
+      dist_matrix[r0, r1] <- dist_set_gamma_set_Gi
+    }
+  }
+  return(dist_matrix) 
+  }
+D_matrix <- func_H_distance(runtrack)
+local_density <- c(apply(D_matrix<=0.01, 1, sum))
+
+
+coul <- rep("snow",60)
+
+all_paths <- sort(local_density, index.return = TRUE, decreasing = TRUE)$ix
+top_5 <- head(all_paths, 5)
+coul[top_5]<-"gold"
+
+#finding the low-5 paths with the lowest local density and show on map
+lowest_5 <- tail(all_paths, 5)
+coul[lowest_5]<-"#003366"
+
+
+#grap rep
+
+barplot(local_density,col=coul)
+abline(h=c(2,22), col=c("#003366", "gold"), lty=c(1,1), lwd=c(2, 2))
+legend( x=60,y=26,legend=c("least_5","top_5"), col=c("#003366", "gold"),lty=c(1,1), cex=0.8)
+legend(1, 4, "Run 2" , text.col = c("#003366"),bg="#dcedff",cex = 0.60)
+legend(33, 3, "Run 33" , text.col = c("#003366"),bg="#dcedff",cex = 0.60)
+legend(38, 5, "Run 36" , text.col = c("#003366"),bg="#dcedff",cex = 0.60)
+legend(47, 4, "Run 46" , text.col = c("#003366"),bg="#dcedff",cex = 0.60)
+legend(61, 4, "Run 58" , text.col = c("#003366"),bg="#dcedff",cex = 0.60)
+title("Unormalized density of the tracks ")
+legend(10, 22, "Run 11" , text.col = c("#b8860b"),bg="#fdf2d9",cex = 0.60)
+legend(18, 22, "Run 18" , text.col = c("#b8860b"),bg="#fdf2d9",cex = 0.60)
+legend(23, 20, "Run 23" , text.col = c("#b8860b"),bg="#fdf2d9",cex = 0.60)
+legend(31, 20, "Run 30" , text.col = c("#b8860b"),bg="#fdf2d9",cex = 0.60)
+legend(35, 22, "Run 32" , text.col = c("#b8860b"),bg="#fdf2d9",cex = 0.60)
+
+
+```
+
+  
+####Let's take a look at the top-5 and the least-5 path
+
+
+```{r a Look,echo=FALSE}
+top_5_path = subset(runtrack,  id == paste(c("run_", top_5[1]), collapse = ""))
+for(pp in 2:length(top_5)){
+  top_5_path = rbind(top_5_path, subset( runtrack,  id == paste(c("run_", top_5[pp]), collapse = "")))
+  
+}
+
+lowest_5_path = subset(runtrack,  id == paste(c("run_", lowest_5[1]), collapse = ""))
+
+for(pp in 2:length(lowest_5)){
+  lowest_5_path = rbind(lowest_5_path, subset( runtrack,  id == paste(c("run_", lowest_5[pp]), collapse = "")))
+  
+}
+
+# Plots of highest density paths and lowest density top 5 each ------------
+Hdensity <- ggmap(myMapInD) + geom_point(data = top_5_path, aes(x = lon, y = lat,  col=id),size = 1.5, lineend = "round", alpha = .6)
+Ldensity <- ggmap(myMapInD) + geom_point(data = lowest_5_path, aes(x = lon, y = lat, col = id),  lineend = "round", size = 1.5, alpha = .6)
+
+print(Hdensity)
+print(Ldensity)
+```
+
+
+
+### Now let's (try to) find clusters
+#### The return of problems
+The problem of the choice of the mathematical represenation strikes back here. If we were to consider the track as true functions and proceed with mean shift with functional addition (by approximating the tracks by n-gones with n the number of point of the track) the time would get a far too great importance in our opinion. From the begining of the analisys What fondamently matters was where the runner goes not in witch order. Hence it's the image of the functions into C that we are truly interested in If we want to take the time into account we need to change the distance because it's not taking the time into account. For example, if to tracks follows the same path in opposite sense they are associated with two complete different functions which may be differnte given any t, yet the H distance is null. If we were to run mean shift in those circunstance here is what could happen.
+<br/>;
+image: ![](https://preview.ibb.co/fOWUe7/b.png)
+<br/>;
+But without it what addition to consider ? We had to somehow go back to point level but with a density herited from the track level. The principal problem with it is that tracks are only translated and not deformed.  
+
+
+
+
+#### The results we got
+```{r suite,echo=FALSE}
+
+# Part 02 (b) -------------------------------------------------------------
+
+##choosing the radius according to some distribution of data on hausdorff distance
+h_candidates <- quantile(D_matrix, seq( 0.05, 1, by=0.05 ))
+
+
+
+modes <- meanShift(D_matrix, trainData = D_matrix, nNeighbors = 10,
+                   algorithm = "KDTREE", kernelType = "EPANECHNIKOV", bandwidth = rep(1,NCOL(D_matrix)), 
+                   alpha = 0, iterations = 10, epsilon = 0.030504474,
+                   epsilonCluster = 0.030504474, parameters=NULL)
+
+#Checking the values for the clustered data
+
+clusters = sort(modes$assignment, index.return = TRUE, decreasing = TRUE)
+
+modes_centers <- unique(modes$value)
+gp <- ggmap(myMapInD)
+
+m<-modes$assignment
+
+#Creating vectors of data belonging to same cluster for clustering 
+c1 = c()
+c2 = c()
+c3 =c()
+c4 = c()
+for(i in 1:60){
+  if(m[i, 1] == 1){
+    c1 = cbind(c1, c(i))
+  }else if(m[i, 1] == 2){
+    c2 = cbind(c2, c(i))
+  }else if(m[i, 1] == 3){
+    c3 = cbind(c3, c(i))
+  }else{ c4 = cbind(c4, c(i))}
+}
+
+#function to bind the data together in single cluster
+func_cluster = function(points){
+  cluster = c()
+  for(pp in 1:length(points)){
+    cluster = rbind(cluster, subset( runtrack,  id == paste(c("run_", points[pp]), collapse = "")))
+  }
+  return(cluster)
+}
+
+#list of clusters which is four
+cluster1 = func_cluster(c1)
+cluster2 = func_cluster(c2)
+cluster3 = func_cluster(c3)
+cluster4 = func_cluster(c4)
+
+#plotting the clusters in four different colors
+cluster_data <-ggmap(myMapInD)+ geom_point(data = cluster2, aes(x = lon, y = lat, col = id), size = 0.5, color= "#0040ff", alpha = .4)
+cluster_data <-cluster_data  + geom_point(data = cluster1, aes(x = lon, y = lat, col = id), size = 0.5, color= "#00ffbf", alpha = .4)
+cluster_data <-cluster_data  + geom_point(data = cluster3, aes(x = lon, y = lat, col = id), size = 1.1, color= "#ff0040", alpha = .6)
+cluster_data <-cluster_data  + geom_point(data = cluster4, aes(x = lon, y = lat, col = id), size = 1, color= "#ffbf00", alpha = .4)
+
+plot(cluster_data)
+```
+
